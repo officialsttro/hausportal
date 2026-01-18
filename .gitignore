@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtualenv
+.venv/
+
+# Environment / Secrets
+.env
+
+# OS
+.DS_Store
+
+# Logs
+*.log
