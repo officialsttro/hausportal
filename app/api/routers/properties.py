@@ -1,51 +1,57 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_admin
-from app.api.deps_db import get_db
+from app.api.deps import get_db, get_current_user
 from app.models.property import Property
 from app.models.user import User
-from app.schemas.property import PropertyCreateRequest, PropertyResponse
 
-router = APIRouter()
+router = APIRouter(prefix="/properties", tags=["properties"])
 
 
-@router.get("", response_model=list[PropertyResponse])
+@router.get("")
 def list_properties(
+    db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
-    rows = db.scalars(select(Property).where(Property.tenant_id == user.tenant_id).order_by(Property.id)).all()
-    return rows
+    return (
+        db.query(Property)
+        .filter(Property.tenant_id == user.tenant_id)
+        .order_by(Property.id.asc())
+        .all()
+    )
 
 
-@router.post("", response_model=PropertyResponse)
+@router.post("")
 def create_property(
-    payload: PropertyCreateRequest,
-    admin: User = Depends(require_admin),
+    payload: dict,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
+    if user.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    name = payload.get("name")
+    street = payload.get("street")
+    postal_code = payload.get("postal_code")
+    city = payload.get("city")
+
+    if not name or not street or not postal_code or not city:
+        raise HTTPException(status_code=400, detail="name, street, postal_code, city required")
+
     prop = Property(
-        tenant_id=admin.tenant_id,
-        name=payload.name,
-        street=payload.street,
-        postal_code=payload.postal_code,
-        city=payload.city,
+        tenant_id=user.tenant_id,
+        name=name,
+        street=street,
+        postal_code=postal_code,
+        city=city,
     )
     db.add(prop)
     db.commit()
     db.refresh(prop)
-    return prop
-
-
-@router.get("/{property_id}", response_model=PropertyResponse)
-def get_property(
-    property_id: int,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    prop = db.scalar(select(Property).where(Property.id == property_id, Property.tenant_id == user.tenant_id))
-    if not prop:
-        raise HTTPException(status_code=404, detail="Property not found")
-    return prop
+    return {
+        "id": prop.id,
+        "name": prop.name,
+        "street": prop.street,
+        "postal_code": prop.postal_code,
+        "city": prop.city,
+    }

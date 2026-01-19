@@ -1,103 +1,87 @@
 from datetime import datetime, timedelta, timezone
-import hashlib
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_admin
-from app.api.deps_db import get_db
-from app.core.security import hash_password
+from app.api.deps import get_db, get_current_user
 from app.models.invite import Invite
 from app.models.user import User
-from app.schemas.invite import (
-    InviteCreateRequest,
-    InviteCreateResponse,
-    InviteAcceptRequest,
-    InviteAcceptResponse,
-)
+from app.core.security import hash_password
 
-router = APIRouter()
+router = APIRouter(prefix="/invites", tags=["invites"])
 
 
-def hash_token(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-@router.post("", response_model=InviteCreateResponse)
+@router.post("")
 def create_invite(
-    payload: InviteCreateRequest,
-    admin: User = Depends(require_admin),
+    payload: dict,
     db: Session = Depends(get_db),
-) -> InviteCreateResponse:
-    raw_token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=payload.expires_hours)
+    user: User = Depends(get_current_user),
+):
+    if user.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Not allowed")
 
-    inv = Invite(
-        tenant_id=admin.tenant_id,
-        email=payload.email,
-        role=payload.role,
-        language=payload.language,
-        token_hash=hash_token(raw_token),
+    email = payload.get("email")
+    role = payload.get("role")
+    language = payload.get("language", "de")
+    expires_hours = payload.get("expires_hours", 48)
+
+    if not email or not role:
+        raise HTTPException(status_code=400, detail="email and role required")
+
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=int(expires_hours))
+
+    invite = Invite(
+        tenant_id=user.tenant_id,
+        email=email,
+        role=role,
+        language=language,
+        token=token,
         expires_at=expires_at,
-        used_at=None,
-        created_by=admin.id,
-        created_at=datetime.now(timezone.utc),
     )
-    db.add(inv)
+    db.add(invite)
     db.commit()
-    db.refresh(inv)
+    db.refresh(invite)
 
-    return InviteCreateResponse(
-        id=inv.id,
-        email=inv.email,
-        expires_at=inv.expires_at,
-        token=raw_token,
-    )
+    return {
+        "id": invite.id,
+        "email": invite.email,
+        "expires_at": invite.expires_at,
+        "token": invite.token,
+    }
 
 
-@router.post("/accept", response_model=InviteAcceptResponse)
-def accept_invite(payload: InviteAcceptRequest, db: Session = Depends(get_db)) -> InviteAcceptResponse:
-    token_h = hash_token(payload.token)
+@router.post("/accept")
+def accept_invite(payload: dict, db: Session = Depends(get_db)):
+    token = payload.get("token")
+    password = payload.get("password")
 
-    inv = db.scalar(select(Invite).where(Invite.token_hash == token_h))
-    if not inv:
-        raise HTTPException(status_code=400, detail="Invalid invite token")
+    if not token or not password:
+        raise HTTPException(status_code=400, detail="token and password required")
+
+    invite = db.query(Invite).filter(Invite.token == token).first()
+    if not invite:
+        raise HTTPException(status_code=404, detail="Invite not found")
 
     now = datetime.now(timezone.utc)
-
-    if inv.used_at is not None:
-        raise HTTPException(status_code=400, detail="Invite already used")
-
-    # expires_at might be naive depending on DB; normalize check defensively
-    expires_at = inv.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-
-    if expires_at < now:
+    if invite.expires_at < now:
         raise HTTPException(status_code=400, detail="Invite expired")
 
-    # Email already registered in this tenant?
-    existing = db.scalar(
-        select(User).where(User.tenant_id == inv.tenant_id, User.email == inv.email)
-    )
+    # check if user already exists
+    existing = db.query(User).filter(User.email == invite.email).first()
     if existing:
         raise HTTPException(status_code=400, detail="User already exists")
 
-    user = User(
-        tenant_id=inv.tenant_id,
-        email=inv.email,
-        password_hash=hash_password(payload.password),
-        role=inv.role,
-        language=inv.language,
-        status="active",
+    new_user = User(
+        tenant_id=invite.tenant_id,
+        email=invite.email,
+        role=invite.role,
+        language=invite.language,
+        password_hash=hash_password(password),
     )
-    db.add(user)
-
-    inv.used_at = now
-
+    db.add(new_user)
     db.commit()
-    db.refresh(user)
+    db.refresh(new_user)
 
-    return InviteAcceptResponse(user_id=user.id, email=user.email)
+    return {"user_id": new_user.id, "email": new_user.email}

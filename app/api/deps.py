@@ -1,40 +1,48 @@
-from fastapi import Depends, HTTPException
+from __future__ import annotations
+
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps_db import get_db
 from app.core.security import decode_token
+from app.db.session import SessionLocal
 from app.models.user import User
 
-bearer_scheme = HTTPBearer(auto_error=False)
+security = HTTPBearer(auto_error=True)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def get_current_user(
-    creds: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
-    if creds is None or not creds.credentials:
-        raise HTTPException(status_code=401, detail="Missing bearer token")
+    token = credentials.credentials
+    payload = decode_token(token)
 
-    try:
-        payload = decode_token(creds.credentials)
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    sub = payload.get("sub")
-    if not sub:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    user = db.scalar(select(User).where(User.id == int(sub)))
+    user = db.get(User, int(user_id))
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    if user.status != "active":
-        raise HTTPException(status_code=403, detail="User inactive")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    # Status ist bei dir (noch) nicht in der DB/model vorhanden -> optional behandeln
+    user_status = getattr(user, "status", "active")
+    if user_status != "active":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User inactive")
+
     return user
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:
-    if user.role != "ADMIN":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if getattr(user, "role", None) != "ADMIN":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin required")
     return user

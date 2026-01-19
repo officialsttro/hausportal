@@ -1,24 +1,33 @@
-from pydantic import Field
+from __future__ import annotations
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # Grundkonfiguration
+    app_env: str = "local"
+
+    # DB
+    database_url: str = "postgresql+psycopg://hausportal:hausportal@localhost:5432/hausportal"
+
+    # JWT
+    jwt_secret: str = "CHANGE_ME"
+    jwt_alg: str = "HS256"
+    access_token_exp_minutes: int = 60
+
+    # MinIO / S3
+    minio_endpoint: str = "http://localhost:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: str = "minioadmin"
+    minio_bucket: str = "hausportal"
+    minio_region: str = "us-east-1"
+
+    # Pydantic Settings
     model_config = SettingsConfigDict(
         env_file=".env",
-        extra="ignore",
-        case_sensitive=False,
+        env_file_encoding="utf-8",
+        extra="ignore",  # wichtig: alte/zusätzliche env vars sollen nicht crashen
     )
-
-    app_env: str = Field(default="local", validation_alias="APP_ENV")
-    database_url: str = Field(validation_alias="DATABASE_URL")
-
-    minio_endpoint: str = Field(validation_alias="MINIO_ENDPOINT")
-    minio_access_key: str = Field(validation_alias="MINIO_ACCESS_KEY")
-    minio_secret_key: str = Field(validation_alias="MINIO_SECRET_KEY")
-    minio_bucket: str = Field(validation_alias="MINIO_BUCKET")
-
-    jwt_secret: str = Field(validation_alias="JWT_SECRET")
-    jwt_alg: str = Field(default="HS256", validation_alias="JWT_ALG")
 
 
 settings = Settings()

@@ -1,27 +1,46 @@
+from datetime import datetime, timedelta, timezone
+
+import jwt
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps_db import get_db
-from app.core.security import verify_password, create_access_token
+from app.api.deps import get_db
+from app.core.config import settings
+from app.core.security import verify_password
 from app.models.user import User
-from app.schemas.auth import LoginRequest, TokenResponse
 
-router = APIRouter()
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
-    user = db.scalar(select(User).where(User.email == payload.email))
-    if not user:
+def _token_exp_minutes() -> int:
+    # Robust: falls dein Settings-Objekt das Feld (noch) nicht hat,
+    # nehmen wir 60 Minuten als Default.
+    val = getattr(settings, "access_token_exp_minutes", 60)
+    try:
+        return int(val)
+    except Exception:
+        return 60
+
+
+@router.post("/login")
+def login(payload: dict, db: Session = Depends(get_db)):
+    email = payload.get("email")
+    password = payload.get("password")
+
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="email and password required")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user or not verify_password(password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    if user.status != "active":
-        raise HTTPException(status_code=403, detail="User inactive")
+    now = datetime.now(timezone.utc)
+    exp = now + timedelta(minutes=_token_exp_minutes())
 
-    if not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = jwt.encode(
+        {"sub": str(user.id), "iat": int(now.timestamp()), "exp": int(exp.timestamp())},
+        settings.jwt_secret,
+        algorithm="HS256",
+    )
 
-    # subject contains user id (string)
-    token = create_access_token(subject=str(user.id), expires_minutes=60)
-    return TokenResponse(access_token=token)
+    return {"access_token": token, "token_type": "bearer"}

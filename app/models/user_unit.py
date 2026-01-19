@@ -1,7 +1,7 @@
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import String, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base_class import Base
 
 
 class UserUnit(Base):
@@ -10,5 +10,4 @@ class UserUnit(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
     unit_id: Mapped[int] = mapped_column(ForeignKey("units.id"), primary_key=True)
 
-    # "TENANT" oder "OWNER" (Mieter/Eigentümer)
-    relation_type: Mapped[str] = mapped_column(String(20), nullable=False, default="TENANT")
+    relation_type: Mapped[str] = mapped_column(String(20))  # TENANT | OWNER
