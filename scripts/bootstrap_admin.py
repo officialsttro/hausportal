@@ -17,17 +17,25 @@ def main() -> int:
 
     db = SessionLocal()
     try:
-        # create tenant
-        tenant = Tenant(name=tenant_name)
-        db.add(tenant)
-        db.flush()  # get tenant.id
+        # find or create tenant
+        tenant = db.scalar(select(Tenant).where(Tenant.name == tenant_name))
+        if not tenant:
+            tenant = Tenant(name=tenant_name)
+            db.add(tenant)
+            db.flush()  # tenant.id
 
-        # ensure no existing admin with same email in this tenant (simple for now)
-        existing = db.scalar(select(User).where(User.tenant_id == tenant.id, User.email == email))
-        if existing:
-            print("Admin email already exists in this tenant.")
-            db.rollback()
-            return 1
+        # find existing admin in this tenant
+        admin = db.scalar(select(User).where(User.tenant_id == tenant.id, User.email == email))
+
+        if admin:
+            admin.password_hash = hash_password(password)
+            admin.role = "ADMIN"
+            admin.language = "de"
+            admin.status = "active"
+            db.add(admin)
+            db.commit()
+            print(f"Updated tenant id={tenant.id}, admin user id={admin.id}")
+            return 0
 
         admin = User(
             tenant_id=tenant.id,

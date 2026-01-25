@@ -24,7 +24,15 @@ def get_current_user(
     db: Session = Depends(get_db),
 ) -> User:
     token = credentials.credentials
-    payload = decode_token(token)
+
+    # IMPORTANT: niemals 500 bei kaputtem/leerem Token -> sauber 401
+    try:
+        payload = decode_token(token)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
 
     user_id = payload.get("sub")
     if not user_id:
@@ -34,9 +42,8 @@ def get_current_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
-    # Status ist bei dir (noch) nicht in der DB/model vorhanden -> optional behandeln
-    user_status = getattr(user, "status", "active")
-    if user_status != "active":
+    # status ist jetzt im Model vorhanden; falls DB/User jemals "inactive" wird -> sperren
+    if getattr(user, "status", "active") != "active":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User inactive")
 
     return user

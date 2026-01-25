@@ -15,3 +15,11 @@ class User(Base):
 
     role: Mapped[str] = mapped_column(String(20), default="ADMIN")  # ADMIN | RESIDENT
     language: Mapped[str] = mapped_column(String(10), default="de")
+
+    # DB hat users.status NOT NULL -> muss im ORM vorhanden sein
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
