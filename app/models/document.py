@@ -28,8 +28,12 @@ class Document(Base):
     content_type: Mapped[str] = mapped_column(String(100))
     size_bytes: Mapped[int] = mapped_column(Integer)
 
-    # 🔑 DAS ist der Schlüssel in MinIO / S3
+    # 🔑 Key in MinIO / S3
     object_key: Mapped[str] = mapped_column(String(1024), index=True)
+
+    # Publish (MVP)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    published_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow

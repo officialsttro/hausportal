@@ -1,21 +1,49 @@
 from __future__ import annotations
 
 from datetime import datetime
-from botocore.exceptions import ClientError
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, Query
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db
-from app.core.config import settings
-from app.integrations.s3 import ensure_bucket_exists, get_s3_client, put_object
+from app.api.deps import get_current_user, require_admin, get_db
 from app.models.document import Document
 from app.models.user import User
+from app.services.documents import (
+    create_document_and_upload,
+    delete_document_and_object,
+    get_document_download_url,
+)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-@router.post("")
-def upload_document(
+@router.get("")
+def list_documents(
+    scope: str | None = None,
+    property_id: int | None = None,
+    unit_id: int | None = None,
+    published_only: bool = False,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    # MVP: Admin sieht alles im Tenant. (Resident-Filter später sauber.)
+    q = db.query(Document).filter(Document.tenant_id == user.tenant_id)
+
+    if scope:
+        q = q.filter(Document.scope == scope.upper())
+    if property_id:
+        q = q.filter(Document.property_id == property_id)
+    if unit_id:
+        q = q.filter(Document.unit_id == unit_id)
+
+    if published_only:
+        q = q.filter(Document.published_at.isnot(None))
+
+    return q.order_by(Document.created_at.desc()).all()
+
+
+@router.post("", dependencies=[Depends(require_admin)])
+async def upload_document(
     scope: str = Form(...),
     property_id: int | None = Form(None),
     unit_id: int | None = Form(None),
@@ -23,111 +51,48 @@ def upload_document(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    # Basic Validation
-    if scope not in ("PROPERTY", "UNIT"):
-        raise HTTPException(status_code=422, detail="scope must be PROPERTY or UNIT")
-
-    if scope == "PROPERTY" and not property_id:
-        raise HTTPException(status_code=422, detail="property_id is required for scope PROPERTY")
-
-    if scope == "UNIT" and not unit_id:
-        raise HTTPException(status_code=422, detail="unit_id is required for scope UNIT")
-
-    data = file.file.read()
-    size = len(data)
-
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    safe_name = (file.filename or "file").replace("/", "_")
-    if scope == "PROPERTY":
-        object_key = f"tenant_{user.tenant_id}/properties/{property_id}/{ts}_{safe_name}"
-    else:
-        object_key = f"tenant_{user.tenant_id}/units/{unit_id}/{ts}_{safe_name}"
-
-    s3 = get_s3_client()
-    ensure_bucket_exists(s3)
-    bucket = settings.minio_bucket
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
 
     try:
-        put_object(
-            s3,
-            key=object_key,
-            data=data,
+        doc = create_document_and_upload(
+            db,
+            tenant_id=user.tenant_id,
+            uploaded_by=user.id,
+            scope=scope,
+            property_id=property_id,
+            unit_id=unit_id,
+            filename=file.filename or "upload.bin",
             content_type=file.content_type or "application/octet-stream",
+            data=data,
         )
-    except ClientError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    doc = Document(
-        tenant_id=user.tenant_id,
-        scope=scope,
-        property_id=property_id,
-        unit_id=unit_id,
-        uploaded_by=user.id,
-        filename=file.filename or "file",
-        content_type=file.content_type or "application/octet-stream",
-        size_bytes=size,
-        object_key=object_key,
-    )
-    db.add(doc)
-    db.commit()
-    db.refresh(doc)
-
-    return {
-        "id": doc.id,
-        "scope": doc.scope,
-        "property_id": doc.property_id,
-        "unit_id": doc.unit_id,
-        "uploaded_by": doc.uploaded_by,
-        "filename": doc.filename,
-        "content_type": doc.content_type,
-        "size_bytes": doc.size_bytes,
-        "created_at": doc.created_at,
-    }
+        # Upload ist erstmal Entwurf (published_at bleibt NULL)
+        return doc
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("")
-def list_documents(
-    scope: str | None = Query(None, pattern="^(PROPERTY|UNIT)$"),
-    property_id: int | None = Query(None, ge=1),
-    unit_id: int | None = Query(None, ge=1),
+@router.post("/{document_id}/publish", dependencies=[Depends(require_admin)])
+def publish_document(
+    document_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    q = db.query(Document).filter(Document.tenant_id == user.tenant_id)
+    doc = db.get(Document, document_id)
+    if not doc or doc.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Document not found")
 
-    if scope:
-        q = q.filter(Document.scope == scope)
+    if doc.published_at is not None:
+        # idempotent: bereits published
+        return doc
 
-    # property_id nur sinnvoll bei PROPERTY
-    if property_id is not None:
-        if scope == "UNIT":
-            # explizit UNIT + property_id macht keinen Sinn -> leer
-            return []
-        q = q.filter(Document.property_id == property_id)
+    doc.published_at = datetime.utcnow()
+    doc.published_by = user.id
 
-    # unit_id nur sinnvoll bei UNIT
-    if unit_id is not None:
-        if scope == "PROPERTY":
-            # explizit PROPERTY + unit_id macht keinen Sinn -> leer
-            return []
-        q = q.filter(Document.unit_id == unit_id)
-
-    docs = q.order_by(Document.id.desc()).all()
-
-    return [
-        {
-            "id": d.id,
-            "scope": d.scope,
-            "property_id": d.property_id,
-            "unit_id": d.unit_id,
-            "uploaded_by": d.uploaded_by,
-            "filename": d.filename,
-            "content_type": d.content_type,
-            "size_bytes": d.size_bytes,
-            "created_at": d.created_at,
-        }
-        for d in docs
-    ]
+    db.commit()
+    db.refresh(doc)
+    return doc
 
 
 @router.get("/{document_id}/download")
@@ -136,28 +101,23 @@ def download_document(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    doc = (
-        db.query(Document)
-        .filter(Document.id == document_id, Document.tenant_id == user.tenant_id)
-        .first()
-    )
+    doc = db.get(Document, document_id)
+    if not doc or doc.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # MVP: Zugriffskontrolle für Residents kommt als nächster Schritt
+    url = get_document_download_url(doc)
+    return {"url": url}
+
+
+@router.delete("/{document_id}", dependencies=[Depends(require_admin)])
+def delete_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+):
+    doc = db.get(Document, document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    if not getattr(doc, "object_key", None):
-        raise HTTPException(status_code=500, detail="Document has no object_key")
-
-    s3 = get_s3_client()
-    ensure_bucket_exists(s3)
-
-    bucket = settings.minio_bucket
-    try:
-        url = s3.generate_presigned_url(
-            ClientMethod="get_object",
-            Params={"Bucket": bucket, "Key": doc.object_key},
-            ExpiresIn=600,
-        )
-    except ClientError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    return {"id": doc.id, "url": url}
+    delete_document_and_object(db, doc)
+    return {"status": "deleted"}

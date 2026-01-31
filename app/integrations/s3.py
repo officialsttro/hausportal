@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-from botocore.exceptions import ClientError
 import boto3
+from botocore.client import Config
+from botocore.exceptions import ClientError
 
 from app.core.config import settings
 
 
 def get_s3_client():
+    # Wichtig: MinIO Presigned URLs brauchen i.d.R. SigV4 => signature_version="s3v4"
     return boto3.client(
         "s3",
         endpoint_url=settings.minio_endpoint,
         aws_access_key_id=settings.minio_access_key,
         aws_secret_access_key=settings.minio_secret_key,
         region_name="us-east-1",
+        config=Config(signature_version="s3v4"),
     )
 
 
